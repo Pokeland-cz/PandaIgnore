@@ -4,7 +4,8 @@
 	"compatibilityLevel": "JAVA_21",
 	"mixins": [
       "MessageCommandMixin",
-      "PlayerManagerMixin"
+      "PlayerManagerMixin",
+      "EEssentialsIgnoreMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

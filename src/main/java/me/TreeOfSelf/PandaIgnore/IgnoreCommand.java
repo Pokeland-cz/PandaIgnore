@@ -1,116 +1,133 @@
 package me.TreeOfSelf.PandaIgnore;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
 import net.minecraft.command.argument.EntityArgumentType;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
+import net.minecraft.util.UserCache;
 
-import java.util.List;
+import java.util.UUID;
 
 import static net.minecraft.server.command.CommandManager.argument;
 import static net.minecraft.server.command.CommandManager.literal;
 
 public class IgnoreCommand {
-    public IgnoreCommand() {
-    }
 
+    private static final SuggestionProvider<ServerCommandSource> SUGGEST_NOT_IGNORED = (ctx, builder) -> {
+        ServerPlayerEntity player = ctx.getSource().getPlayerOrThrow();
+        var data = StateSaverAndLoader.getPlayerState(player);
+        String remaining = builder.getRemainingLowerCase();
 
-    private static final SuggestionProvider<ServerCommandSource> PLAYER_NOT_IGNORED_BUILDER = (context, builder) -> {
-        ServerPlayerEntity player = context.getSource().getPlayerOrThrow();
-        StateSaverAndLoader.PlayerIgnoreData playerData = StateSaverAndLoader.getPlayerState(player);
+        ctx.getSource().getServer().getPlayerManager().getPlayerList().stream()
+                .filter(p -> !p.getUuid().equals(player.getUuid()))
+                .filter(p -> !data.ignoredPlayers.contains(p.getUuid()))
+                .map(p -> p.getGameProfile().getName())
+                .filter(name -> name.toLowerCase().startsWith(remaining))
+                .forEach(builder::suggest);
 
-        String input = builder.getRemaining().toLowerCase();
-        List<String> playerNames = context.getSource().getServer().getPlayerManager().getPlayerList().stream()
-                .filter(p -> !playerData.ignoredPlayers.contains(p.getUuid()) && !p.getUuid().equals(player.getUuid()))  // Only players not ignored and not self
-                .map(p -> p.getGameProfile().name())
-                .filter(name -> name.toLowerCase().startsWith(input))
-                .toList();
-
-        for (String name : playerNames) {
-            builder.suggest(name);
-        }
         return builder.buildFuture();
     };
 
-    private static final SuggestionProvider<ServerCommandSource> PLAYER_IGNORED_BUILDER = (context, builder) -> {
-        ServerPlayerEntity player = context.getSource().getPlayerOrThrow();
-        StateSaverAndLoader.PlayerIgnoreData playerData = StateSaverAndLoader.getPlayerState(player);
+    private static final SuggestionProvider<ServerCommandSource> SUGGEST_IGNORED = (ctx, builder) -> {
+        ServerPlayerEntity player = ctx.getSource().getPlayerOrThrow();
+        var data = StateSaverAndLoader.getPlayerState(player);
+        String remaining = builder.getRemainingLowerCase();
 
-        String input = builder.getRemaining().toLowerCase();
-        List<String> playerNames = context.getSource().getServer().getPlayerManager().getPlayerList().stream()
-                .filter(p -> playerData.ignoredPlayers.contains(p.getUuid()) && !p.getUuid().equals(player.getUuid()))  // Only players ignored and not self
-                .map(p -> p.getGameProfile().name())
-                .filter(name -> name.toLowerCase().startsWith(input))
-                .toList();
+        ctx.getSource().getServer().getPlayerManager().getPlayerList().stream()
+                .filter(p -> data.ignoredPlayers.contains(p.getUuid()))
+                .map(p -> p.getGameProfile().getName())
+                .filter(name -> name.toLowerCase().startsWith(remaining))
+                .forEach(builder::suggest);
 
-        for (String name : playerNames) {
-            builder.suggest(name);
-        }
         return builder.buildFuture();
     };
 
     public static void register(CommandDispatcher<ServerCommandSource> dispatcher) {
         dispatcher.register(literal("ignore")
+                .requires(src -> src.getPlayer() != null) // only players
+
                 .then(argument("player", EntityArgumentType.player())
-                        .suggests(PLAYER_NOT_IGNORED_BUILDER)
-                        .executes(context -> execute(context.getSource(), EntityArgumentType.getPlayer(context, "player"))))
+                        .suggests(SUGGEST_NOT_IGNORED)
+                        .executes(ctx -> addIgnore(ctx, EntityArgumentType.getPlayer(ctx, "player"))))
+
                 .then(literal("list")
-                        .executes(context -> listIgnored(context.getSource())))
+                        .executes(IgnoreCommand::listIgnored))
+
                 .then(literal("remove")
                         .then(argument("player", EntityArgumentType.player())
-                                .suggests(PLAYER_IGNORED_BUILDER)
-                                .executes(context -> removeIgnore(context.getSource(), EntityArgumentType.getPlayer(context, "player"))))));
+                                .suggests(SUGGEST_IGNORED)
+                                .executes(ctx -> removeIgnore(ctx, EntityArgumentType.getPlayer(ctx, "player")))))
+        );
     }
 
-    private static int execute(ServerCommandSource source, ServerPlayerEntity targetPlayer) throws CommandSyntaxException {
-        ServerPlayerEntity player = source.getPlayerOrThrow();
-        if (player == targetPlayer) {
-            source.sendError(Text.literal("You cannot ignore yourself."));
+    private static int addIgnore(CommandContext<ServerCommandSource> ctx, ServerPlayerEntity target) throws CommandSyntaxException {
+        ServerPlayerEntity player = ctx.getSource().getPlayerOrThrow();
+        if (player.equals(target)) {
+            player.sendMessage(Text.literal("You cannot ignore yourself!").formatted(Formatting.RED));
             return 0;
         }
 
-        StateSaverAndLoader.PlayerIgnoreData playerData = StateSaverAndLoader.getPlayerState(player);
-        if (playerData.ignoredPlayers.add(targetPlayer.getUuid())) {
-            StateSaverAndLoader.getServerState(source.getServer()).markDirty();
-            player.sendMessage(Text.literal("You are now ignoring " + targetPlayer.getName().getString() + "."), false);
+        var data = StateSaverAndLoader.getPlayerState(player);
+        if (data.ignoredPlayers.add(target.getUuid())) {
+            StateSaverAndLoader.getServerState(player.getServer()).markDirty();
+            player.sendMessage(Text.literal("Now ignoring ").append(target.getDisplayName()).append("."));
             return 1;
-        } else {
-            player.sendMessage(Text.literal("You are already ignoring " + targetPlayer.getName().getString() + "."), false);
-            return 0;
         }
+        player.sendMessage(Text.literal("You are already ignoring ").append(target.getDisplayName()).append("."));
+        return 0;
     }
 
-    private static int listIgnored(ServerCommandSource source) throws CommandSyntaxException {
-        ServerPlayerEntity player = source.getPlayerOrThrow();
-        StateSaverAndLoader.PlayerIgnoreData playerData = StateSaverAndLoader.getPlayerState(player);
+    private static int listIgnored(CommandContext<ServerCommandSource> ctx) throws CommandSyntaxException {
+        ServerPlayerEntity player = ctx.getSource().getPlayerOrThrow();
+        var data = StateSaverAndLoader.getPlayerState(player);
 
-        if (playerData.ignoredPlayers.isEmpty()) {
-            player.sendMessage(Text.literal("You are not ignoring any players."), false);
-        } else {
-            player.sendMessage(Text.literal("Players you are ignoring:"), false);
-            for (ServerPlayerEntity ignoredPlayer : source.getServer().getPlayerManager().getPlayerList()) {
-                if (playerData.ignoredPlayers.contains(ignoredPlayer.getUuid())) {
-                    player.sendMessage(Text.literal("- " + ignoredPlayer.getName().getString()), false);
-                }
+        if (data.ignoredPlayers.isEmpty()) {
+            player.sendMessage(Text.literal("You are not ignoring anyone.").formatted(Formatting.GRAY));
+            return 0;
+        }
+
+        player.sendMessage(Text.literal("Ignored players:").formatted(Formatting.YELLOW));
+
+        MinecraftServer server = player.getServer();
+        UserCache userCache = server.getUserCache();
+        int count = 0;
+
+        for (UUID uuid : data.ignoredPlayers) {
+            ServerPlayerEntity online = server.getPlayerManager().getPlayer(uuid);
+            String name;
+
+            if (online != null) {
+                name = online.getName().getString();
+            } else {
+                name = userCache.getByUuid(uuid)
+                        .map(profile -> profile.getName())
+                        .orElse("??? (" + uuid.toString().substring(0, 8) + ")");
             }
+
+            player.sendMessage(Text.literal(" - ").append(Text.literal(name).formatted(Formatting.WHITE)));
+            count++;
         }
-        return 1;
+
+        player.sendMessage(Text.literal("Total: " + count).formatted(Formatting.GRAY));
+        return count;
     }
 
-    private static int removeIgnore(ServerCommandSource source, ServerPlayerEntity targetPlayer) throws CommandSyntaxException {
-        ServerPlayerEntity player = source.getPlayerOrThrow();
+    private static int removeIgnore(CommandContext<ServerCommandSource> ctx, ServerPlayerEntity target) throws CommandSyntaxException {
+        ServerPlayerEntity player = ctx.getSource().getPlayerOrThrow();
+        var data = StateSaverAndLoader.getPlayerState(player);
 
-        StateSaverAndLoader.PlayerIgnoreData playerData = StateSaverAndLoader.getPlayerState(player);
-        if (playerData.ignoredPlayers.remove(targetPlayer.getUuid())) {
-            StateSaverAndLoader.getServerState(source.getServer()).markDirty();
-            player.sendMessage(Text.literal("You are no longer ignoring " + targetPlayer.getName().getString() + "."), false);
+        if (data.ignoredPlayers.remove(target.getUuid())) {
+            StateSaverAndLoader.getServerState(player.getServer()).markDirty();
+            player.sendMessage(Text.literal("No longer ignoring ").append(target.getDisplayName()).append("."));
             return 1;
-        } else {
-            player.sendMessage(Text.literal("You were not ignoring " + targetPlayer.getName().getString() + "."), false);
-            return 0;
         }
+        player.sendMessage(Text.literal("You weren't ignoring ").append(target.getDisplayName()).append("."));
+        return 0;
     }
 }
